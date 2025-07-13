@@ -28,12 +28,6 @@ jobs:
           - goos: darwin
             goarch: arm64
             suffix: darwin-arm64
-          - goos: windows
-            goarch: amd64
-            suffix: windows-amd64.exe
-          - goos: windows
-            goarch: arm64
-            suffix: windows-arm64.exe
 
     steps:
     - name: Checkout code
@@ -114,7 +108,6 @@ jobs:
           ### Supported Platforms
           - Linux (x86_64, ARM64, ARMv7)
           - macOS (Intel, Apple Silicon)
-          - Windows (x86_64, ARM64)
           
           ### Files
           - `checksums.txt` - SHA256 checksums for all binaries

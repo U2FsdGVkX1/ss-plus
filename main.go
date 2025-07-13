@@ -8,9 +8,34 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"github.com/xiaoqidun/qqwry"
 )
+
+// Terminal window size structure
+type winsize struct {
+	Row    uint16
+	Col    uint16
+	Xpixel uint16
+	Ypixel uint16
+}
+
+// Get terminal width
+func getTerminalWidth() int {
+	ws := &winsize{}
+	retCode, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(syscall.Stdin),
+		uintptr(syscall.TIOCGWINSZ),
+		uintptr(unsafe.Pointer(ws)))
+
+	if int(retCode) == -1 {
+		fmt.Fprintf(os.Stderr, "Warning: Could not get terminal width: %v\n", errno)
+		return 80 // Default width
+	}
+	return int(ws.Col)
+}
 
 func downloadQQwry() bool {
 	qqwryFile := "qqwry.ipdb"
@@ -64,7 +89,7 @@ func getIPInfo(ipAddress string) string {
 		return fmt.Sprintf("Query failed: %v", err)
 	}
 
-	result := strings.TrimSpace(location.Country + " " + location.Province + " " + location.City + " " + location.District + " " + location.ISP)
+	result := strings.TrimSpace(location.Province + " " + location.City + " " + location.District + " " + location.ISP)
 	if result == "" {
 		return "Unknown"
 	}
@@ -77,16 +102,14 @@ func parsePeerAddress(peerAddress string) string {
 	}
 	
 	// IPv4 format: ip:port
-	ipv4Regex := regexp.MustCompile(`^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$`)
-	if matches := ipv4Regex.FindStringSubmatch(peerAddress); len(matches) > 1 {
-		return matches[1]
+	if ipv4Regex := regexp.MustCompile(`^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$`); ipv4Regex.MatchString(peerAddress) {
+		return ipv4Regex.FindStringSubmatch(peerAddress)[1]
 	}
 	
 	// IPv6 format: [ip]:port
 	if strings.Contains(peerAddress, "[") && strings.Contains(peerAddress, "]:") {
-		ipv6Regex := regexp.MustCompile(`^\[([^\]]+)\]:\d+$`)
-		if matches := ipv6Regex.FindStringSubmatch(peerAddress); len(matches) > 1 {
-			return matches[1]
+		if ipv6Regex := regexp.MustCompile(`^\[([^\]]+)\]:\d+$`); ipv6Regex.MatchString(peerAddress) {
+			return ipv6Regex.FindStringSubmatch(peerAddress)[1]
 		}
 	}
 	
@@ -95,6 +118,15 @@ func parsePeerAddress(peerAddress string) string {
 
 func runSSCommand(args []string) (string, error) {
 	cmd := exec.Command("ss", args...)
+	
+	// Set terminal width and environment variables
+	termWidth := getTerminalWidth()
+	env := os.Environ()
+	env = append(env, fmt.Sprintf("COLUMNS=%d", termWidth))
+	env = append(env, "TERM=xterm")
+	cmd.Env = env
+	
+	// Get output
 	output, err := cmd.Output()
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
@@ -114,12 +146,10 @@ func processSSOutput(output string) string {
 		return output
 	}
 	
-	// Find header line (look for State or Recv-Q)
-	headerLine := ""
+	// Find header line
 	headerIndex := -1
 	for i, line := range lines {
 		if strings.Contains(line, "State") || strings.Contains(line, "Recv-Q") {
-			headerLine = line
 			headerIndex = i
 			break
 		}
@@ -129,11 +159,11 @@ func processSSOutput(output string) string {
 	}
 	
 	// Add IPInfo column to header
-	newHeader := headerLine + "\tIPInfo"
-	processedLines := append(lines[:headerIndex], newHeader)
-	peerRegex := regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+|\[[^\]]+\]:\d+|\*:\*|0\.0\.0\.0:\*)`)
+	processedLines := append(lines[:headerIndex], lines[headerIndex])
 	
 	// Process each data line
+	peerRegex := regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+|\[[^\]]+\]:\d+|\*:\*|0\.0\.0\.0:\*)`)
+	
 	for i := headerIndex + 1; i < len(lines); i++ {
 		line := lines[i]
 		if strings.TrimSpace(line) == "" {
@@ -141,36 +171,31 @@ func processSSOutput(output string) string {
 			continue
 		}
 		
-		// Find all potential peer addresses in the line
+		// Find peer address and get IP info
 		matches := peerRegex.FindAllString(line, -1)
-		peerAddress := ""
+		ipInfo := "N/A"
+		
 		if len(matches) >= 2 {
-			peerAddress = matches[1]
+			// Second match is usually the peer address
+			if ip := parsePeerAddress(matches[1]); ip != "" {
+				ipInfo = getIPInfo(ip)
+			}
 		} else if len(matches) == 1 {
-			// Check if this is the peer address by looking at position
-			// If it's after some whitespace and fields, it's likely the peer
+			// Check if this is the peer address by field position
 			fields := strings.Fields(line)
 			if len(fields) >= 4 {
 				for j := 3; j < len(fields); j++ {
 					if peerRegex.MatchString(fields[j]) {
-						peerAddress = fields[j]
+						if ip := parsePeerAddress(fields[j]); ip != "" {
+							ipInfo = getIPInfo(ip)
+						}
 						break
 					}
 				}
 			}
 		}
 		
-		// Get IP info
-		ipInfo := "N/A"
-		if peerAddress != "" && peerAddress != "*" && peerAddress != "*:*" {
-			ip := parsePeerAddress(peerAddress)
-			if ip != "" {
-				ipInfo = getIPInfo(ip)
-			}
-		}
-		
-		// Ensure line ends with tab + IP info
-		processedLines = append(processedLines, strings.TrimRight(line, " \t\n\r")+"\t"+ipInfo)
+		processedLines = append(processedLines, strings.TrimRight(line, " \t\n\r")+" "+ipInfo)
 	}
 	
 	return strings.Join(processedLines, "\n")
@@ -184,25 +209,19 @@ func main() {
 		return
 	}
 	
-	// Download qqwry.ipdb if not exists
+	// Download and load IP database
 	if !downloadQQwry() {
 		fmt.Println("Cannot proceed without qqwry.ipdb file")
 		os.Exit(1)
 	}
 	
-	// Load IP database
 	if err := qqwry.LoadFile("qqwry.ipdb"); err != nil {
 		fmt.Printf("Failed to load qqwry.ipdb: %v\n", err)
 		os.Exit(1)
 	}
 	
-	// Run ss command
-	ssOutput, err := runSSCommand(args)
-	if err != nil {
-		os.Exit(1)
-	}
-	
-	// Process output and add IP info column
+	// Run ss command and process output
+	ssOutput, _ := runSSCommand(args)
 	processedOutput := processSSOutput(ssOutput)
 	fmt.Print(processedOutput + "\n")
 }
